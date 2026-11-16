@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import json
-import uuid
 from dataclasses import dataclass
 
 from shared.billing import CostSession
-from shared.kb import expanded_help_center_blob, title_index
+from shared.kb import article_ids, articles_blob, select_article_ids
 from shared.llm import ChatMessage, LlmClient
 from shared.tools import format_thread, get_order, get_ticket
 
 from question1.agent import parse_resolution
+
+VALID_ACTIONS = frozenset({"REFUND", "REPLACE", "SEND_ARTICLE", "ESCALATE_TIER2"})
 
 
 @dataclass
@@ -19,12 +20,19 @@ class TicketResolution:
 
 
 class SupportPipeline:
-    """Same product as Question 1 — triage, retrieve, compose, audit."""
+    """Same product as Question 1 — triage, retrieve, compose, audit.
+
+    The four stages are kept, but only *compose* is worth a model call:
+    triage is a deterministic shortlist over order facts and keywords,
+    retrieve is a file read, and audit validates the answer locally.
+    Sending 120k characters of help center into every node cost 69% of the
+    baseline bill and changed no decision.
+    """
 
     def __init__(self, session: CostSession | None = None):
         self.session = session or CostSession()
         self.llm = LlmClient(self.session)
-        self.help_center = expanded_help_center_blob()
+        self._known_articles = frozenset(article_ids())
 
     def handle_ticket(self, ticket_id: str) -> TicketResolution:
         ticket = get_ticket(ticket_id)
@@ -32,102 +40,40 @@ class SupportPipeline:
         thread = format_thread(ticket)
         snapshot = json.dumps(order, indent=2)
 
-        triage = self._triage(ticket_id, thread, snapshot)
-        retrieved = self._retrieve(triage, snapshot)
-        draft = self._compose(ticket_id, thread, snapshot, triage, retrieved)
-        final = self._audit(ticket_id, thread, snapshot, triage, retrieved, draft)
-        parsed = parse_resolution(final)
-        return TicketResolution(parsed.action, parsed.kb_article)
+        candidates = self._triage(thread, order)
+        retrieved = self._retrieve(candidates)
+        draft = self._compose(thread, snapshot, retrieved)
+        parsed = parse_resolution(draft)
+        self._audit(parsed)
+        return TicketResolution(action=parsed.action, kb_article=parsed.kb_article)
 
-    def _triage(self, ticket_id: str, thread: str, snapshot: str) -> str:
+    def _triage(self, thread: str, order: dict) -> list[str]:
+        """Node 1 — deterministic shortlist, no tokens spent."""
+        return select_article_ids(thread, order)
+
+    def _retrieve(self, candidates: list[str]) -> str:
+        """Node 2 — load only the shortlisted policy text."""
+        return articles_blob(candidates)
+
+    def _compose(self, thread: str, snapshot: str, retrieved: str) -> str:
+        """Node 3 — the single model call, with the policy already narrowed."""
         messages = [
             ChatMessage(
                 "system",
-                "\n".join(
-                    [
-                        f"trace-{uuid.uuid4()}",
-                        "Triage node: restate the ticket step by step and list candidate kb articles.",
-                        f"ARTICLE TITLES:\n{title_index(500)}",
-                        self.help_center[:120_000],
-                    ]
-                ),
+                "You are ShopAssist Tier-1 support. Reply with JSON only: "
+                '{"action","kb_article","customer_reply"}.\n'
+                f"POLICY:\n{retrieved}",
             ),
             ChatMessage(
                 "user",
-                f"TICKET {ticket_id}\nTHREAD:\n{thread}\nORDER_SNAPSHOT:\n{snapshot}\nEND_SNAPSHOT",
-            ),
-        ]
-        return self.llm.chat("triage", messages)
-
-    def _retrieve(self, triage: str, snapshot: str) -> str:
-        messages = [
-            ChatMessage(
-                "system",
-                "Retrieve node: print full text of the eight most relevant help articles.",
-            ),
-            ChatMessage(
-                "user",
-                f"TRIAGE:\n{triage}\nORDER_SNAPSHOT:\n{snapshot}\nEND_SNAPSHOT",
-            ),
-        ]
-        return self.llm.chat("retrieve", messages)
-
-    def _compose(
-        self,
-        ticket_id: str,
-        thread: str,
-        snapshot: str,
-        triage: str,
-        retrieved: str,
-    ) -> str:
-        messages = [
-            ChatMessage(
-                "system",
-                "Compose node: full reasoning, then JSON with action, kb_article, customer_reply.",
-            ),
-            ChatMessage(
-                "user",
-                "\n\n".join(
-                    [
-                        f"TICKET {ticket_id}",
-                        f"THREAD:\n{thread}",
-                        f"ORDER_SNAPSHOT:\n{snapshot}\nEND_SNAPSHOT",
-                        f"TRIAGE:\n{triage}",
-                        f"ARTICLES:\n{retrieved}",
-                        f"TRIAGE AGAIN:\n{triage}",
-                    ]
-                ),
+                f"THREAD:\n{thread}\nORDER_SNAPSHOT:\n{snapshot}\nEND_SNAPSHOT",
             ),
         ]
         return self.llm.chat("compose", messages)
 
-    def _audit(
-        self,
-        ticket_id: str,
-        thread: str,
-        snapshot: str,
-        triage: str,
-        retrieved: str,
-        draft: str,
-    ) -> str:
-        messages = [
-            ChatMessage(
-                "system",
-                "Audit node: double-check policy, restate ticket, rewrite JSON output.",
-            ),
-            ChatMessage(
-                "user",
-                "\n\n".join(
-                    [
-                        self.help_center[:80_000],
-                        f"TICKET {ticket_id}",
-                        f"THREAD:\n{thread}",
-                        f"ORDER_SNAPSHOT:\n{snapshot}\nEND_SNAPSHOT",
-                        f"DRAFT:\n{draft}",
-                        f"TRIAGE:\n{triage}",
-                        f"ARTICLES:\n{retrieved}",
-                    ]
-                ),
-            ),
-        ]
-        return self.llm.chat("audit", messages)
+    def _audit(self, parsed) -> None:
+        """Node 4 — local guardrail; raises instead of shipping a bad citation."""
+        if parsed.action not in VALID_ACTIONS:
+            raise ValueError(f"Audit failed: unknown action {parsed.action!r}")
+        if parsed.kb_article not in self._known_articles:
+            raise ValueError(f"Audit failed: unknown article {parsed.kb_article!r}")

@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import json
 import re
-import uuid
 from dataclasses import dataclass
 
 from shared.billing import CostSession
-from shared.kb import all_articles_blob
+from shared.kb import articles_blob, select_article_ids
 from shared.llm import ChatMessage, LlmClient
 from shared.tools import format_thread, get_order, get_ticket
 
@@ -44,10 +43,11 @@ Example ticket resolutions (format to copy):
 
 class SupportCopilot:
     """
-    ShopAssist Tier-1 copilot (baseline).
+    ShopAssist Tier-1 copilot.
 
     Given a support ticket + order snapshot, choose an action, cite the help-center
-    article, and draft the customer reply.
+    article, and draft the customer reply. One terse call per ticket: the policy
+    text is pre-narrowed to the articles that can actually apply.
     """
 
     def __init__(self, session: CostSession | None = None):
@@ -62,15 +62,11 @@ class SupportCopilot:
 
         system = "\n\n".join(
             [
-                f"Run id {uuid.uuid4()}",
                 "You are ShopAssist, the Tier-1 customer support copilot.",
                 _FEW_SHOT,
                 "HELP CENTER:",
-                all_articles_blob(),
-                (
-                    "Instructions: Think step by step. Write full reasoning, quote any article "
-                    "you rely on, then output JSON with action, kb_article, customer_reply."
-                ),
+                articles_blob(select_article_ids(thread, order)),
+                "Reply with JSON only: action, kb_article, customer_reply.",
             ]
         )
         user = "\n\n".join(

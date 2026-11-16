@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from collections.abc import Iterable
 from functools import lru_cache
 from pathlib import Path
 
@@ -25,6 +27,61 @@ def all_articles_blob() -> str:
     for aid in article_ids():
         parts.append(f"--- {aid} ---\n{load_article(aid)}\n")
     return "\n".join(parts)
+
+
+_ARTICLE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "custom-items-no-replace",
+        ("custom", "customized", "personalized", "personalised", "engraved", "printed"),
+    ),
+    ("damage-replacement-7-days", ("damage", "damaged", "cracked", "broken", "defective")),
+    (
+        "digital-license-no-refund",
+        ("digital", "ebook", "e-book", "license", "licence", "download"),
+    ),
+    ("subscription-cooling-off", ("subscription", "subscriptions", "renewal", "renew")),
+    ("returns-within-30-days", ("refund", "refunds", "return", "returns", "unopened")),
+)
+
+
+def select_article_ids(text: str, order: dict, limit: int = 2) -> list[str]:
+    """Cheap deterministic shortlist of articles worth sending to the model.
+
+    Order facts decide first (they are authoritative), keyword overlap is the
+    fallback. Only these articles enter the prompt, instead of the whole KB.
+    """
+    if order.get("product_type") == "subscription":
+        ranked = ["subscription-cooling-off"]
+    elif order.get("license_revealed"):
+        ranked = ["digital-license-no-refund"]
+    elif order.get("customized") and order.get("damage_reported"):
+        ranked = ["custom-items-no-replace", "damage-replacement-7-days"]
+    elif order.get("damage_reported"):
+        ranked = ["damage-replacement-7-days", "custom-items-no-replace"]
+    else:
+        low = text.lower()
+        scored = sorted(
+            (
+                (
+                    sum(
+                        1
+                        for word in words
+                        if re.search(rf"\b{re.escape(word)}\b", low)
+                    ),
+                    aid,
+                )
+                for aid, words in _ARTICLE_RULES
+            ),
+            reverse=True,
+        )
+        ranked = [aid for score, aid in scored if score > 0] or ["returns-within-30-days"]
+    known = set(article_ids())
+    return [aid for aid in ranked if aid in known][:limit]
+
+
+def articles_blob(ids: Iterable[str]) -> str:
+    """Concatenate only the selected articles."""
+    return "\n".join(f"--- {aid} ---\n{load_article(aid).strip()}" for aid in ids)
 
 
 @lru_cache

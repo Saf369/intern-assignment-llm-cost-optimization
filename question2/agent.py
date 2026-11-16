@@ -4,7 +4,8 @@ import json
 from dataclasses import dataclass
 
 from shared.billing import CostSession
-from shared.kb import article_ids, articles_blob, select_article_ids
+from shared.hybrid_retrieval import retrieve as retrieve_articles
+from shared.kb import article_ids, articles_blob
 from shared.llm import ChatMessage, LlmClient
 from shared.tools import format_thread, get_order, get_ticket
 
@@ -23,8 +24,8 @@ class SupportPipeline:
     """Same product as Question 1 — triage, retrieve, compose, audit.
 
     The four stages are kept, but only *compose* is worth a model call:
-    triage is a deterministic shortlist over order facts and keywords,
-    retrieve is a file read, and audit validates the answer locally.
+    triage is a deterministic shortlist over order facts, keywords and local
+    embeddings, retrieve is a file read, and audit validates the answer locally.
     Sending 120k characters of help center into every node cost 69% of the
     baseline bill and changed no decision.
     """
@@ -49,7 +50,7 @@ class SupportPipeline:
 
     def _triage(self, thread: str, order: dict) -> list[str]:
         """Node 1 — deterministic shortlist, no tokens spent."""
-        return select_article_ids(thread, order)
+        return retrieve_articles(thread, order)
 
     def _retrieve(self, candidates: list[str]) -> str:
         """Node 2 — load only the shortlisted policy text."""

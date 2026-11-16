@@ -34,7 +34,24 @@ _ARTICLE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
         "custom-items-no-replace",
         ("custom", "customized", "personalized", "personalised", "engraved", "printed"),
     ),
-    ("damage-replacement-7-days", ("damage", "damaged", "cracked", "broken", "defective")),
+    (
+        "damage-replacement-7-days",
+        (
+            "damage",
+            "damaged",
+            "cracked",
+            "broken",
+            "defective",
+            # Functional-defect synonyms. Deliberately specific: a generic
+            # "not working" would also match "the download isn't working",
+            # where digital-license-no-refund should win.
+            "malfunction",
+            "malfunctioning",
+            "faulty",
+            "stopped working",
+            "stopped functioning",
+        ),
+    ),
     (
         "digital-license-no-refund",
         ("digital", "ebook", "e-book", "license", "licence", "download"),
@@ -44,37 +61,49 @@ _ARTICLE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
 )
 
 
+def rule_candidates(order: dict) -> list[str] | None:
+    """Order-fact rules. Returns ``None`` when no explicit rule applies."""
+    if order.get("product_type") == "subscription":
+        return ["subscription-cooling-off"]
+    if order.get("license_revealed"):
+        return ["digital-license-no-refund"]
+    if order.get("customized") and order.get("damage_reported"):
+        return ["custom-items-no-replace", "damage-replacement-7-days"]
+    if order.get("damage_reported"):
+        return ["damage-replacement-7-days", "custom-items-no-replace"]
+    return None
+
+
+def keyword_ranking(text: str) -> list[tuple[str, int]]:
+    """Articles with their word-boundary keyword hit count, best first."""
+    low = (text if isinstance(text, str) else "").lower()
+    scored = sorted(
+        (
+            (
+                sum(
+                    1
+                    for word in words
+                    if re.search(rf"\b{re.escape(word)}\b", low)
+                ),
+                aid,
+            )
+            for aid, words in _ARTICLE_RULES
+        ),
+        reverse=True,
+    )
+    return [(aid, score) for score, aid in scored]
+
+
 def select_article_ids(text: str, order: dict, limit: int = 2) -> list[str]:
     """Cheap deterministic shortlist of articles worth sending to the model.
 
     Order facts decide first (they are authoritative), keyword overlap is the
     fallback. Only these articles enter the prompt, instead of the whole KB.
     """
-    if order.get("product_type") == "subscription":
-        ranked = ["subscription-cooling-off"]
-    elif order.get("license_revealed"):
-        ranked = ["digital-license-no-refund"]
-    elif order.get("customized") and order.get("damage_reported"):
-        ranked = ["custom-items-no-replace", "damage-replacement-7-days"]
-    elif order.get("damage_reported"):
-        ranked = ["damage-replacement-7-days", "custom-items-no-replace"]
-    else:
-        low = text.lower()
-        scored = sorted(
-            (
-                (
-                    sum(
-                        1
-                        for word in words
-                        if re.search(rf"\b{re.escape(word)}\b", low)
-                    ),
-                    aid,
-                )
-                for aid, words in _ARTICLE_RULES
-            ),
-            reverse=True,
-        )
-        ranked = [aid for score, aid in scored if score > 0] or ["returns-within-30-days"]
+    ranked = rule_candidates(order or {})
+    if ranked is None:
+        ranked = [aid for aid, score in keyword_ranking(text) if score > 0]
+        ranked = ranked or ["returns-within-30-days"]
     known = set(article_ids())
     return [aid for aid in ranked if aid in known][:limit]
 

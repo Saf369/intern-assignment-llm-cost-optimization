@@ -5,7 +5,8 @@ import re
 from dataclasses import dataclass
 
 from shared.billing import CostSession
-from shared.kb import articles_blob, select_article_ids
+from shared.hybrid_retrieval import retrieve as retrieve_articles
+from shared.kb import articles_blob
 from shared.llm import ChatMessage, LlmClient
 from shared.tools import format_thread, get_order, get_ticket
 
@@ -65,7 +66,7 @@ class SupportCopilot:
                 "You are ShopAssist, the Tier-1 customer support copilot.",
                 _FEW_SHOT,
                 "HELP CENTER:",
-                articles_blob(select_article_ids(thread, order)),
+                articles_blob(retrieve_articles(thread, order)),
                 "Reply with JSON only: action, kb_article, customer_reply.",
             ]
         )

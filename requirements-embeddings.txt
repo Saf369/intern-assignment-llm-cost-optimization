@@ -1,0 +1,10 @@
+# Optional dependency for hybrid semantic retrieval.
+#
+# Install CPU-only torch first so pip does not pull the CUDA wheels (~2.5 GB):
+#
+#   pip install --index-url https://download.pytorch.org/whl/cpu torch
+#   pip install -r requirements-embeddings.txt
+#
+# The app works without this file: shared/hybrid_retrieval.py falls back to
+# keyword + rule retrieval when the model is unavailable.
+sentence-transformers>=3.0

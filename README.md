@@ -61,7 +61,7 @@ Per-call details are in `shared/billing.py` (`CostSession` on your agent).
 
 Cost (points per public ticket; lower is better):
 
-| Track | Baseline | Now | Change | Budget |
+| Track | Before | After | Change | Budget |
 |---|---:|---:|---:|---:|
 | Q1 — single call | 8,810 | **1,599** | **−81.8%** | 3,000 |
 | Q2 — pipeline | 73,350 | **1,227** | **−98.3%** | 2,500 |
@@ -92,11 +92,57 @@ On Q2, all four pipeline stages called the model, and two of them pasted 8.4k–
 | Removed the per-run `uuid4()` from the prompt | deterministic token counts |
 | Select 1–2 relevant articles instead of all 5 | smaller input |
 
+What that was worth, per ticket:
+
+| Ticket | Before | After | Saved |
+|---|---:|---:|---:|
+| T-1001 | 8,850 | 1,683 | −81.0% |
+| T-1002 | 8,757 | 1,536 | −82.5% |
+| T-1003 | 8,916 | 1,608 | −82.0% |
+| T-1004 | 8,715 | 1,569 | −82.0% |
+| **average** | **8,810** | **1,599** | **−81.8%** |
+
+Exact breakdown for T-1001, showing where the points were:
+
+| | Before tokens | Before points | After tokens | After points |
+|---|---:|---:|---:|---:|
+| Input (×3) | 525 | 1,575 | 331 | 993 |
+| Output (×15) | 485 | 7,275 | 46 | 690 |
+| **Total** | | **8,850** | | **1,683** |
+
+Output was 82% of the original bill. The `uuid4()` removal is not visible
+here because it mostly changed tokenization; the two big levers were the
+verbose instruction and the narrowed article context.
+
 ### 3. Q2: keep four stages, one model call
 
 The four named stages remain (`triage → retrieve → compose → audit`), but only `compose` calls the model. Triage is a deterministic shortlist, retrieve is a file read, audit is local validation. The arithmetic forces this: the shortest possible completion is the 46-token JSON = 690 points, so four model calls cost ≥2,760 points before any input — over the 2,500 budget by themselves.
 
 Removing the eager `expanded_help_center_blob()` build also deleted an O(n²) token-counting loop that dominated startup.
+
+What that was worth, per ticket:
+
+| Ticket | Before | After | Saved |
+|---|---:|---:|---:|
+| T-1001 | 73,548 | 1,311 | −98.2% |
+| T-1002 | 73,374 | 1,164 | −98.4% |
+| T-1003 | 72,999 | 1,236 | −98.3% |
+| T-1004 | 73,479 | 1,197 | −98.4% |
+| **average** | **73,350** | **1,227** | **−98.3%** |
+
+Where the points were on T-1001:
+
+| Stage | Before points | After points | Saved |
+|---|---:|---:|---:|
+| triage | 32,694 | 0 | 32,694 |
+| retrieve | 2,478 | 0 | 2,478 |
+| compose | 10,899 | 1,311 | 9,588 |
+| audit | 27,477 | 0 | 27,477 |
+| **total** | **73,548** | **1,311** | **72,237** |
+
+The one remaining call still sends 207 input tokens and returns 46 output
+tokens — the JSON itself is 690 of those 1,311 points, which is why the
+budget cannot absorb a second call.
 
 ### 4. Hybrid retrieval
 
@@ -117,6 +163,22 @@ score         = 0.5 * keyword_norm + 0.5 * semantic_norm
 The 50/50 split is deliberate: keyword hits are sparse but high-precision on this corpus, while raw cosine is dense but uncalibrated (an unrelated question can score 0.33). Ties break by article id, `limit=2` is preserved, so prompts do not grow. Article vectors are computed once per process; only the query is embedded per request.
 
 Adding the word `malfunctioning` to the damage vocabulary was also needed — it appeared in neither the keyword list nor the article text, so only the noisy cosine signal was left, and it put the custom-items article first. With the synonym, the keyword vote dominates and the correct article ranks first.
+
+Retrieval cost before and after (26 benchmark queries, one process):
+
+| Cost | Keyword only | Hybrid | Delta |
+|---|---:|---:|---:|
+| Prompt tokens per query | 44.6 | 55.5 | +10.9 |
+| Total prompt tokens, 26 queries | 1,160 | 1,442 | +282 |
+| Mean latency per query | 0.03 ms | 4.82 ms | +4.79 ms |
+| One-time model load | — | ~3.2 s | |
+| Graded-run points (Q1 / Q2) | 6,396 / 4,908 | 6,396 / 4,908 | **0** |
+
+Hybrid retrieves 1.42 articles per query on average (keyword: 1.12) because
+it often keeps a second candidate; semantic-only would be 2.00 articles and
+77.3 tokens. On the graded tickets the extra cost is exactly zero, because the
+same articles are selected, so the hybrid layer adds accuracy without touching
+the score.
 
 ### 5. Fallback and tests
 

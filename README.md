@@ -76,6 +76,25 @@ Free-text retrieval, measured on 22 labeled queries (`eval/retrieval_benchmark.p
 | Embeddings only | 81.8% | 90.9% | 0.864 |
 | **Hybrid (used by both agents)** | **95.5%** | **95.5%** | **0.955** |
 
+## Method: how this was done
+
+1. **Baseline before any edit.** Ran both agents untouched and recorded per-ticket points from `CostSession`; the resolutions from that run became the correctness reference.
+2. **Ranked cost by call, not by file.** Output tokens cost 5× input, so I compared input/output and per-stage points instead of guessing. That showed Q1's padded completion was 82% of its bill and Q2's triage/audit calls dominated — the shared KB was not the problem.
+3. **Changed the smallest thing that addressed each cause, then re-checked.** Removed the verbose triggers, dropped the `uuid4()`, narrowed the context; kept Q2's four stage names but moved three of them off the model. After each step: `pytest`, both `run.py` scripts, and a diff of `action` / `kb_article` against the reference.
+4. **Kept the old behaviour runnable.** `select_article_ids()` and the keyword/rule path remain, and `SHOPASSIST_DISABLE_EMBEDDINGS=1` reproduces the same answers and exact point totals — so the new layer can be removed without a regression.
+5. **Wrote retrieval labels before measuring.** 26 cases (22 policy questions, 4 non-policy) with their expected article; compared keyword-only, embeddings-only and hybrid on top-1, top-2, MRR, latency and prompt tokens.
+6. **Diagnosed the remaining failure from scores, not from guesses.** For "malfunctioning" I printed the keyword hits and the cosine per article: zero keyword hits, a 0.11 cosine margin for the wrong article, so the fix was the missing synonym. Re-running the benchmark confirmed 81.8% → 95.5% top-1.
+7. **Checked the constraints mechanically.** `git diff` against the simulator, grader, `data/`, billing and the original tests is empty; the suite passes with the model installed (52) and with it unavailable (31 passed, 21 skipped).
+
+Commands used:
+
+```bash
+pytest -q
+python question1/run.py
+python question2/run.py
+python eval/retrieval_benchmark.py --markdown RETRIEVAL_BENCHMARK.md
+```
+
 ## How the optimization works
 
 ### 1. Measure first
